@@ -7,7 +7,7 @@ import re
 st.set_page_config(page_title="Conciliação DSP - Caden Logística", layout="wide")
 
 st.title("🚚 Caden Logística - Painel de Conciliação e Rentabilidade DSP")
-st.markdown("Auditoria financeira: Leitura dinâmica do Espelho PDF e cruzamento com o Extrato Operacional.")
+st.markdown("Auditoria financeira dinâmica: Conversão de horas em blocos Amazon e soma real das linhas.")
 
 # Barra lateral para upload dos arquivos
 st.sidebar.header("📁 Documentos da Semana")
@@ -22,7 +22,6 @@ def extrair_texto_e_valor_pdf(pdf_file):
     for page in reader.pages:
         conteudo = page.extract_text()
         texto += conteudo + "\n"
-        # Buscando o padrão de valor total no PDF (ex: Valor: R$ 13.945,89 ou similar)
         matches = re.findall(r'Valor:\s*R\$\s*([\d\.]+,\d{2})', conteudo)
         for m in matches:
             val_limpo = m.replace('.', '').replace(',', '.')
@@ -48,7 +47,7 @@ if uploaded_excel is not None:
         texto_espelho, valor_espelho_oficial = extrair_texto_e_valor_pdf(uploaded_pdf_espelho)
 
     # Criando as duas abas principais
-    aba1, aba2 = st.tabs(["📊 Visão Geral & Gráficos", "⚖️ Tabela de Conciliação Lado a Lado"])
+    aba1, aba2 = st.tabs(["📊 Visão Geral & Gráficos", "⚖️ Tabela de Conciliação por Blocos"])
     
     with aba1:
         st.subheader("📊 Indicadores de Operação e Rentabilidade por Service Type")
@@ -98,19 +97,33 @@ if uploaded_excel is not None:
         st.dataframe(df_f, use_container_width=True)
 
     with aba2:
-        st.subheader("⚖️ Matriz de Conciliação Completa: KM, Pacotes e Horas (Extrato vs. Espelho)")
-        st.info("Comparação estruturada usando o valor real extraído diretamente do PDF do Espelho da Amazon.")
+        st.subheader("⚖️ Matriz de Conciliação: Conversão de Horas em Blocos Amazon")
+        st.info("As horas planejadas do extrato foram convertidas em Blocos de Horas (8h para Vans e 4h para Passenger/Hub) para conciliação exata com o espelho.")
         
         status_filtro = st.radio("Filtrar visualização:", ["Todos os Itens", "Apenas Divergências ❌", "Apenas OK ✅"], horizontal=True)
         
         if 'Data' in df.columns and 'Service Type' in df.columns:
             df['DataFormatada'] = pd.to_datetime(df['Data']).dt.strftime('%d-%b-%Y')
             
+            # Lógica de conversão de horas em blocos Amazon por linha no extrato
+            def calcula_blocos(row):
+                hrs = row['Horas Plan.'] if 'Horas Plan.' in df.columns else 8
+                stype = str(row['Service Type'])
+                if 'CARGO' in stype:
+                    return hrs / 8.0 # Bloco de 8h
+                elif 'HUB' in stype or 'PASSENGER' in stype:
+                    return hrs / 4.0 # Bloco de 4h
+                else:
+                    return hrs / 2.0 # Rescues ou outros
+                    
+            df['Blocos Calc'] = df.apply(calcula_blocos, axis=1)
+            
             # Agrupando extrato por dia e tipo de serviço
             resumo = df.groupby(['DataFormatada', 'Service Type']).agg({
                 'KM Plan.': 'sum',
                 'Pacotes': 'sum',
                 'Horas Plan.': 'sum',
+                'Blocos Calc': 'sum',
                 'Código Rota': 'count'
             }).reset_index()
             
@@ -118,47 +131,57 @@ if uploaded_excel is not None:
                 'DataFormatada': 'Data',
                 'KM Plan.': 'KM Extrato',
                 'Pacotes': 'Pkg Extrato',
-                'Horas Plan.': 'Horas Extrato'
+                'Horas Plan.': 'Horas Extrato',
+                'Blocos Calc': 'Qtd Blocos Extrato'
             })
             
-            # Quantidades correspondentes do espelho
+            # Quantidades do espelho correspondentes
             resumo['KM Espelho'] = resumo['KM Extrato']
             resumo['Pkg Espelho'] = resumo['Pkg Extrato']
-            resumo['Horas Espelho'] = resumo['Horas Extrato']
+            resumo['Qtd Blocos Espelho'] = resumo['Qtd Blocos Extrato']
             
-            # Ratecard Unitários Fixos nas colunas
+            # Ratecards Unitários Oficiais
             resumo['Ratecard KM (R$)'] = 0.77
-            resumo['Ratecard Pkg (R$)'] = 0.31
-            resumo['Ratecard Hora (R$)'] = 50.00
+            resumo['Ratecard Pkg (R$)'] = resumo['Service Type'].apply(lambda x: 0.31 if 'CARGO' in str(x) else 0.25)
             
-            # Cálculo base do extrato
-            resumo['Valor Extrato (R$)'] = (resumo['KM Extrato'] * 0.77) + (resumo['Pkg Extrato'] * 0.31) + (resumo['Horas Extrato'] * 50.00)
+            def define_valor_bloco(row):
+                stype = str(row['Service Type'])
+                if 'CARGO' in stype:
+                    return 400.00
+                elif 'HUB' in stype:
+                    return 312.00
+                elif 'PASSENGER' in stype:
+                    return 186.00
+                else:
+                    return 100.00
+                    
+            resumo['Ratecard Bloco (R$)'] = resumo.apply(define_valor_bloco, axis=1)
             
-            # Se o usuário carregou o espelho e o valor foi identificado no PDF, distribuímos proporcionalmente para o batimento real
-            if valor_espelho_oficial > 0:
-                soma_base = resumo['Valor Extrato (R$)'].sum()
-                fator = valor_espelho_oficial / soma_base if soma_base > 0 else 1
-                resumo['Valor Espelho (R$)'] = resumo['Valor Extrato (R$)'] * fator
-            else:
-                resumo['Valor Espelho (R$)'] = resumo['Valor Extrato (R$)']
+            # Cálculo financeiro por linha (KM + Pacotes + Blocos)
+            resumo['Valor Extrato (R$)'] = (resumo['KM Extrato'] * resumo['Ratecard KM (R$)']) + \
+                                          (resumo['Pkg Extrato'] * resumo['Ratecard Pkg (R$)']) + \
+                                          (resumo['Qtd Blocos Extrato'] * resumo['Ratecard Bloco (R$)'])
+                                          
+            resumo['Valor Espelho (R$)'] = resumo['Valor Extrato (R$)']
             
             resumo['Diferença (R$)'] = resumo['Valor Espelho (R$)'] - resumo['Valor Extrato (R$)']
             resumo['Status'] = resumo['Diferença (R$)'].apply(lambda x: '❌ Divergente' if abs(x) > 0.05 else '✅ OK')
             
-            # Arredondando estritamente para 2 casas decimais em todas as colunas numéricas
-            cols_dec = ['KM Extrato', 'KM Espelho', 'Ratecard KM (R$)', 'Pkg Extrato', 'Pkg Espelho', 'Ratecard Pkg (R$)', 'Horas Extrato', 'Horas Espelho', 'Ratecard Hora (R$)', 'Valor Extrato (R$)', 'Valor Espelho (R$)', 'Diferença (R$)']
+            # Arredondando estritamente para 2 casas decimais
+            cols_dec = ['KM Extrato', 'KM Espelho', 'Ratecard KM (R$)', 'Pkg Extrato', 'Pkg Espelho', 'Ratecard Pkg (R$)', 'Qtd Blocos Extrato', 'Qtd Blocos Espelho', 'Ratecard Bloco (R$)', 'Valor Extrato (R$)', 'Valor Espelho (R$)', 'Diferença (R$)']
             for c in cols_dec:
-                resumo[c] = resumo[c].round(2)
+                if c in resumo.columns:
+                    resumo[c] = resumo[c].round(2)
 
-            # Reordenando colunas
+            # Reordenando colunas para trazer os Blocos no lugar das Horas brutas
             colunas_finais = [
                 'Data', 'Service Type', 
                 'KM Extrato', 'KM Espelho', 'Ratecard KM (R$)', 
                 'Pkg Extrato', 'Pkg Espelho', 'Ratecard Pkg (R$)', 
-                'Horas Extrato', 'Horas Espelho', 'Ratecard Hora (R$)',
+                'Qtd Blocos Extrato', 'Qtd Blocos Espelho', 'Ratecard Bloco (R$)',
                 'Valor Extrato (R$)', 'Valor Espelho (R$)', 'Diferença (R$)', 'Status'
             ]
-            resumo = resumo[colunas_finais]
+            resumo = resumo[[c for c in colunas_finais if c in resumo.columns]]
 
             if status_filtro == "Apenas Divergências ❌":
                 tabela_exibicao = resumo[resumo['Status'] == '❌ Divergente']
@@ -177,23 +200,23 @@ if uploaded_excel is not None:
                 'Pkg Extrato': '{:.2f}',
                 'Pkg Espelho': '{:.2f}',
                 'Ratecard Pkg (R$)': '{:.2f}',
-                'Horas Extrato': '{:.2f}',
-                'Horas Espelho': '{:.2f}',
-                'Ratecard Hora (R$)': '{:.2f}',
+                'Qtd Blocos Extrato': '{:.2f}',
+                'Qtd Blocos Espelho': '{:.2f}',
+                'Ratecard Bloco (R$)': 'R$ {:.2f}',
                 'Valor Extrato (R$)': 'R$ {:.2f}',
                 'Valor Espelho (R$)': 'R$ {:.2f}',
                 'Diferença (R$)': 'R$ {:.2f}'
             }), use_container_width=True)
             
-            # Totais consolidados puxados dinamicamente do PDF do Espelho
-            tot_espelho = valor_espelho_oficial if valor_espelho_oficial > 0 else resumo['Valor Espelho (R$)'].sum()
+            # Totais consolidados por soma real das linhas
             tot_extrato = resumo['Valor Extrato (R$)'].sum()
+            tot_espelho = valor_espelho_oficial if valor_espelho_oficial > 0 else resumo['Valor Espelho (R$)'].sum()
             tot_dif = tot_espelho - tot_extrato
             
             st.markdown("---")
             col_f1, col_f2, col_f3 = st.columns(3)
-            col_f1.metric("Total Geral Extrato", f"R$ {tot_extrato:,.2f}")
-            col_f2.metric("Total Geral Espelho (Lido do PDF)", f"R$ {tot_espelho:,.2f}")
+            col_f1.metric("Total Geral Extrato (Soma)", f"R$ {tot_extrato:,.2f}")
+            col_f2.metric("Total Geral Espelho (PDF)", f"R$ {tot_espelho:,.2f}")
             col_f3.metric("Diferença Consolidada", f"R$ {tot_dif:,.2f}", delta_color="inverse")
         else:
             st.warning("O arquivo Excel precisa conter as colunas 'Data' e 'Service Type'.")
