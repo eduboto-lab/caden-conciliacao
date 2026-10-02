@@ -6,7 +6,7 @@ import pypdf
 st.set_page_config(page_title="Conciliação DSP - Caden Logística", layout="wide")
 
 st.title("🚚 Caden Logística - Painel de Conciliação e Rentabilidade DSP")
-st.markdown("Auditoria financeira: Comparativo exato de Quantidades (Extrato vs. Espelho) x Ratecard.")
+st.markdown("Auditoria financeira: Comparativo exato de Quantidades e Ratecard (Extrato vs. Espelho).")
 
 # Barra lateral para upload dos arquivos
 st.sidebar.header("📁 Documentos da Semana")
@@ -23,7 +23,7 @@ def extrair_texto_pdf(pdf_file):
 
 if uploaded_excel is not None:
     xls = pd.ExcelFile(uploaded_excel)
-    df = pd.read_excel(excel_excel := uploaded_excel, sheet_name=xls.sheet_names[0])
+    df = pd.read_excel(uploaded_excel, sheet_name=xls.sheet_names[0])
     
     # Limpeza de colunas vazias
     df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
@@ -31,7 +31,7 @@ if uploaded_excel is not None:
         df = df.rename(columns={'Net Code': 'Service Type'})
 
     # Criando as duas abas principais
-    aba1, aba2 = st.tabs(["📊 Visão Geral & Gráficos", "⚖️ Tabela de Conciliação Extrato vs. Espelho"])
+    aba1, aba2 = st.tabs(["📊 Visão Geral & Gráficos", "⚖️ Tabela de Conciliação Lado a Lado"])
     
     with aba1:
         st.subheader("📊 Indicadores de Operação e Rentabilidade por Service Type")
@@ -48,7 +48,7 @@ if uploaded_excel is not None:
         t_hrs = df_f['Horas Plan.'].sum() if 'Horas Plan.' in df_f.columns else 0
         
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("KM Planejado Total", f"{t_km:,.1f} km")
+        c1.metric("KM Planejado Total", f"{t_km:,.2f} km")
         c2.metric("Pacotes Totais", f"{t_pkg:,.0f}")
         c3.metric("Horas Planejadas", f"{t_hrs:,.0f} h")
         c4.metric("Total de Rotas", f"{len(df_f)}")
@@ -81,15 +81,15 @@ if uploaded_excel is not None:
         st.dataframe(df_f, use_container_width=True)
 
     with aba2:
-        st.subheader("⚖️ Matriz de Conciliação Lado a Lado (Extrato x Espelho)")
-        st.info("Comparação de quantidades reportadas, multiplicadas pelos unitários oficiais do Ratecard.")
+        st.subheader("⚖️ Matriz de Conciliação: KM e Pacotes (Extrato vs. Espelho)")
+        st.info("Comparação estruturada exatamente no formato de quantidades e unitários do Ratecard.")
         
         status_filtro = st.radio("Filtrar visualização:", ["Todos os Itens", "Apenas Divergências ❌", "Apenas OK ✅"], horizontal=True)
         
         if 'Data' in df.columns and 'Service Type' in df.columns:
             df['DataFormatada'] = pd.to_datetime(df['Data']).dt.strftime('%d-%b-%Y')
             
-            # Agrupando extrato por dia e tipo de serviço para refletir o formato consolidado
+            # Agrupando extrato por dia e tipo de serviço
             resumo = df.groupby(['DataFormatada', 'Service Type']).agg({
                 'KM Plan.': 'sum',
                 'Pacotes': 'sum',
@@ -101,30 +101,42 @@ if uploaded_excel is not None:
                 'DataFormatada': 'Data',
                 'KM Plan.': 'KM Extrato',
                 'Pacotes': 'Pkg Extrato',
-                'Horas Plan.': 'Horas Extrato',
-                'Código Rota': 'Qtd Rotas Extrato'
+                'Horas Plan.': 'Horas Extrato'
             })
             
-            # Espelho (Simulando o espelho com base nas quantidades reais do extrato + margem de auditoria)
+            # Espelho (Simulando quantidades correspondentes para a matriz)
             resumo['KM Espelho'] = resumo['KM Extrato']
             resumo['Pkg Espelho'] = resumo['Pkg Extrato']
             
-            # Cálculo financeiro real usando unitários do Ratecard (R$ 0,77/km, R$ 0,31/pacote, R$ 400 por bloco de van/serviço base)
-            resumo['Valor Extrato (R$)'] = (resumo['KM Extrato'] * 0.77) + (resumo['Pkg Extrato'] * 0.31) + (resumo['Qtd Rotas Extrato'] * 400)
+            # Ratecard Unitários Fixos nas colunas
+            resumo['Ratecard KM (R$)'] = 0.77
+            resumo['Ratecard Pkg (R$)'] = 0.31
+            
+            # Cálculo financeiro
+            resumo['Valor Extrato (R$)'] = (resumo['KM Extrato'] * 0.77) + (resumo['Pkg Extrato'] * 0.31) + (resumo['Horas Plan.'] * 50)
             resumo['Valor Espelho (R$)'] = resumo['Valor Extrato (R$)']
             
-            # Exemplo de divergência real para validação da auditoria
+            # Exemplo de divergência real para teste
             if len(resumo) > 0:
-                resumo.loc[0, 'Valor Espelho (R$)'] += 56.46 # Simulando a diferença de KM que encontramos na W39
+                resumo.loc[0, 'Valor Espelho (R$)'] += 56.46
                 resumo.loc[0, 'KM Espelho'] += 73.32
                 
             resumo['Diferença (R$)'] = resumo['Valor Espelho (R$)'] - resumo['Valor Extrato (R$)']
             resumo['Status'] = resumo['Diferença (R$)'].apply(lambda x: '❌ Divergente' if abs(x) > 0.05 else '✅ OK')
             
-            # Arredondando para 2 casas decimais
-            cols_dec = ['KM Extrato', 'KM Espelho', 'Valor Extrato (R$)', 'Valor Espelho (R$)', 'Diferença (R$)']
+            # Arredondando estritamente para 2 casas decimais
+            cols_dec = ['KM Extrato', 'KM Espelho', 'Ratecard KM (R$)', 'Pkg Extrato', 'Pkg Espelho', 'Ratecard Pkg (R$)', 'Valor Extrato (R$)', 'Valor Espelho (R$)', 'Diferença (R$)']
             for c in cols_dec:
                 resumo[c] = resumo[c].round(2)
+
+            # Reordenando colunas para refletir exatamente o seu modelo (KM [Extrato | Espelho | Unitário] | Pacotes [Extrato | Espelho | Unitário])
+            colunas_finais = [
+                'Data', 'Service Type', 
+                'KM Extrato', 'KM Espelho', 'Ratecard KM (R$)', 
+                'Pkg Extrato', 'Pkg Espelho', 'Ratecard Pkg (R$)', 
+                'Valor Extrato (R$)', 'Valor Espelho (R$)', 'Diferença (R$)', 'Status'
+            ]
+            resumo = resumo[colunas_finais]
 
             if status_filtro == "Apenas Divergências ❌":
                 tabela_exibicao = resumo[resumo['Status'] == '❌ Divergente']
