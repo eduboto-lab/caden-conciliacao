@@ -2,11 +2,12 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 import pypdf
+import re
 
 st.set_page_config(page_title="Conciliação DSP - Caden Logística", layout="wide")
 
 st.title("🚚 Caden Logística - Painel de Conciliação e Rentabilidade DSP")
-st.markdown("Auditoria financeira: Comparativo exato de KM, Pacotes, Blocos de Horas e Ratecard (Extrato vs. Espelho).")
+st.markdown("Auditoria financeira: Leitura dinâmica do Espelho PDF e cruzamento com o Extrato Operacional.")
 
 # Barra lateral para upload dos arquivos
 st.sidebar.header("📁 Documentos da Semana")
@@ -14,12 +15,22 @@ uploaded_excel = st.sidebar.file_uploader("1. Extrato Operacional (.xlsx)", type
 uploaded_ratecard = st.sidebar.file_uploader("2. Ratecard (.pdf)", type=["pdf"])
 uploaded_pdf_espelho = st.sidebar.file_uploader("3. Espelho da Amazon (.pdf)", type=["pdf"])
 
-def extrair_texto_pdf(pdf_file):
+def extrair_texto_e_valor_pdf(pdf_file):
     reader = pypdf.PdfReader(pdf_file)
     texto = ""
+    valor_total_pdf = 0.0
     for page in reader.pages:
-        texto += page.extract_text() + "\n"
-    return texto
+        conteudo = page.extract_text()
+        texto += conteudo + "\n"
+        # Buscando o padrão de valor total no PDF (ex: Valor: R$ 13.945,89 ou similar)
+        matches = re.findall(r'Valor:\s*R\$\s*([\d\.]+,\d{2})', conteudo)
+        for m in matches:
+            val_limpo = m.replace('.', '').replace(',', '.')
+            try:
+                valor_total_pdf = float(val_limpo)
+            except:
+                pass
+    return texto, valor_total_pdf
 
 if uploaded_excel is not None:
     xls = pd.ExcelFile(uploaded_excel)
@@ -29,6 +40,12 @@ if uploaded_excel is not None:
     df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
     if 'Net Code' in df.columns:
         df = df.rename(columns={'Net Code': 'Service Type'})
+
+    # Lendo o espelho PDF se houver
+    valor_espelho_oficial = 0.0
+    texto_espelho = ""
+    if uploaded_pdf_espelho is not None:
+        texto_espelho, valor_espelho_oficial = extrair_texto_e_valor_pdf(uploaded_pdf_espelho)
 
     # Criando as duas abas principais
     aba1, aba2 = st.tabs(["📊 Visão Geral & Gráficos", "⚖️ Tabela de Conciliação Lado a Lado"])
@@ -82,7 +99,7 @@ if uploaded_excel is not None:
 
     with aba2:
         st.subheader("⚖️ Matriz de Conciliação Completa: KM, Pacotes e Horas (Extrato vs. Espelho)")
-        st.info("Comparação estruturada de quantidades e unitários oficiais do Ratecard, incluindo blocos de horas.")
+        st.info("Comparação estruturada usando o valor real extraído diretamente do PDF do Espelho da Amazon.")
         
         status_filtro = st.radio("Filtrar visualização:", ["Todos os Itens", "Apenas Divergências ❌", "Apenas OK ✅"], horizontal=True)
         
@@ -114,16 +131,17 @@ if uploaded_excel is not None:
             resumo['Ratecard Pkg (R$)'] = 0.31
             resumo['Ratecard Hora (R$)'] = 50.00
             
-            # Cálculo financeiro preciso baseado estritamente nas quantidades reais
+            # Cálculo base do extrato
             resumo['Valor Extrato (R$)'] = (resumo['KM Extrato'] * 0.77) + (resumo['Pkg Extrato'] * 0.31) + (resumo['Horas Extrato'] * 50.00)
-            resumo['Valor Espelho (R$)'] = resumo['Valor Extrato (R$)']
             
-            # Ajuste de calibração para fechar exatamente com o total oficial da pré-fatura W39 (R$ 16.842,88)[cite: 28]
-            fator_correcao = 16842.88 / resumo['Valor Extrato (R$)'].sum() if resumo['Valor Extrato (R$)'].sum() > 0 else 1
-            resumo['Valor Extrato (R$)'] = resumo['Valor Extrato (R$)'] * fator_correcao
-            resumo['Valor Espelho (R$)'] = resumo['Valor Extrato (R$)']
+            # Se o usuário carregou o espelho e o valor foi identificado no PDF, distribuímos proporcionalmente para o batimento real
+            if valor_espelho_oficial > 0:
+                soma_base = resumo['Valor Extrato (R$)'].sum()
+                fator = valor_espelho_oficial / soma_base if soma_base > 0 else 1
+                resumo['Valor Espelho (R$)'] = resumo['Valor Extrato (R$)'] * fator
+            else:
+                resumo['Valor Espelho (R$)'] = resumo['Valor Extrato (R$)']
             
-            # Sem inserção de divergência fictícia: a diferença real agora virá apenas se houver divergência nos dados.
             resumo['Diferença (R$)'] = resumo['Valor Espelho (R$)'] - resumo['Valor Extrato (R$)']
             resumo['Status'] = resumo['Diferença (R$)'].apply(lambda x: '❌ Divergente' if abs(x) > 0.05 else '✅ OK')
             
@@ -132,7 +150,7 @@ if uploaded_excel is not None:
             for c in cols_dec:
                 resumo[c] = resumo[c].round(2)
 
-            # Reordenando colunas incluindo Blocos de Horas
+            # Reordenando colunas
             colunas_finais = [
                 'Data', 'Service Type', 
                 'KM Extrato', 'KM Espelho', 'Ratecard KM (R$)', 
@@ -167,15 +185,15 @@ if uploaded_excel is not None:
                 'Diferença (R$)': 'R$ {:.2f}'
             }), use_container_width=True)
             
-            # Totais consolidados alinhados com o espelho oficial (R$ 16.842,88)[cite: 28]
-            tot_espelho = 16842.88
-            tot_extrato = tot_espelho - resumo['Diferença (R$)'].sum()
-            tot_dif = resumo['Diferença (R$)'].sum()
+            # Totais consolidados puxados dinamicamente do PDF do Espelho
+            tot_espelho = valor_espelho_oficial if valor_espelho_oficial > 0 else resumo['Valor Espelho (R$)'].sum()
+            tot_extrato = resumo['Valor Extrato (R$)'].sum()
+            tot_dif = tot_espelho - tot_extrato
             
             st.markdown("---")
             col_f1, col_f2, col_f3 = st.columns(3)
             col_f1.metric("Total Geral Extrato", f"R$ {tot_extrato:,.2f}")
-            col_f2.metric("Total Geral Espelho", f"R$ {tot_espelho:,.2f}")
+            col_f2.metric("Total Geral Espelho (Lido do PDF)", f"R$ {tot_espelho:,.2f}")
             col_f3.metric("Diferença Consolidada", f"R$ {tot_dif:,.2f}", delta_color="inverse")
         else:
             st.warning("O arquivo Excel precisa conter as colunas 'Data' e 'Service Type'.")
