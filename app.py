@@ -31,7 +31,7 @@ if uploaded_excel is not None:
         df = df.rename(columns={'Net Code': 'Service Type'})
 
     # Criando as duas abas principais
-    aba1, aba2 = st.tabs(["📊 Visão Geral & Gráficos", "⚖️ Tabela de Conciliação Lado a Lado"])
+    aba1, aba2 = st.tabs(["📊 Visão Geral & Gráficos", "⚖️️ Tabela de Conciliação Lado a Lado"])
     
     with aba1:
         st.subheader("📊 Indicadores de Operação e Rentabilidade por Service Type")
@@ -89,12 +89,16 @@ if uploaded_excel is not None:
         if 'Data' in df.columns and 'Service Type' in df.columns:
             df['DataFormatada'] = pd.to_datetime(df['Data']).dt.strftime('%d-%b-%Y')
             
+            # Calculando os valores financeiros antes de renomear as colunas
+            df['Valor Linha Extrato'] = (df['KM Plan.'] * 0.77) + (df['Pacotes'] * 0.31) + (df['Horas Plan.'] * 50)
+            
             # Agrupando extrato por dia e tipo de serviço
             resumo = df.groupby(['DataFormatada', 'Service Type']).agg({
                 'KM Plan.': 'sum',
                 'Pacotes': 'sum',
                 'Horas Plan.': 'sum',
-                'Código Rota': 'count'
+                'Código Rota': 'count',
+                'Valor Linha Extrato': 'sum'
             }).reset_index()
             
             resumo = resumo.rename(columns={
@@ -112,8 +116,8 @@ if uploaded_excel is not None:
             resumo['Ratecard KM (R$)'] = 0.77
             resumo['Ratecard Pkg (R$)'] = 0.31
             
-            # Cálculo financeiro
-            resumo['Valor Extrato (R$)'] = (resumo['KM Extrato'] * 0.77) + (resumo['Pkg Extrato'] * 0.31) + (resumo['Horas Plan.'] * 50)
+            # Atribuindo valores
+            resumo['Valor Extrato (R$)'] = resumo['Valor Linha Extrato']
             resumo['Valor Espelho (R$)'] = resumo['Valor Extrato (R$)']
             
             # Exemplo de divergência real para teste
@@ -129,7 +133,7 @@ if uploaded_excel is not None:
             for c in cols_dec:
                 resumo[c] = resumo[c].round(2)
 
-            # Reordenando colunas para refletir exatamente o seu modelo (KM [Extrato | Espelho | Unitário] | Pacotes [Extrato | Espelho | Unitário])
+            # Reordenando colunas
             colunas_finais = [
                 'Data', 'Service Type', 
                 'KM Extrato', 'KM Espelho', 'Ratecard KM (R$)', 
